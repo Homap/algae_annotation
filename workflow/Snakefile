@@ -1,0 +1,293 @@
+# Phase A: Genomes -> Gene families
+configfile: "config/config.yaml"
+localrules: all, edit_assemblies
+
+import pandas as pd
+import os
+
+design_table = pd.read_table(config["sample_table"], sep="\t") # index the pandas table
+species_name = design_table.species
+FastaGenome = design_table.FastaGenome
+
+rule all:
+    input:
+        expand(["data/FastaGenomeEdited/{species}.fasta",
+                "data/FastaGenomeEditedStats/{species}.txt",
+                "results/busco/{species}/short_summary.specific.{lineage}.{species}.txt",
+                "results/repeat_modeler/{species}/{species}.consensi.fa.classified"],species=species_name, lineage=config["lineage"])
+
+rule edit_assemblies:
+    input:
+        genome = lambda wildcards: design_table[species_name == wildcards.species].FastaGenome
+    output:
+        edited_genome = "data/FastaGenomeEdited/{species}.fasta",
+        genome_stats = "data/FastaGenomeEditedStats/{species}.txt"
+    shell:
+        """
+        python workflow/scripts/assembly_stats.py {wildcards.species} {input.genome} {output.edited_genome} {output.genome_stats}
+        """
+
+rule busco_genome:
+    input:
+        genome = "data/FastaGenomeEdited/{species}.fasta"
+    output:
+        short_txt = "results/busco/{species}/short_summary.specific.{lineage}.{species}.txt"
+    params:
+        lineage=config["lineage"],
+        mode="genome",
+        outdir="results/busco",
+        busco_download="resources/busco_downloads"
+    resources:
+        threads=10,
+        mem_mb=60000,
+        runtime="6h"
+    singularity:
+        "containers/busco_v5.7.1_cv1.sif"
+    shell:
+        """
+        bash -c 'export AUGUSTUS_CONFIG_PATH=exploratory_temp/augustus_config/config && \
+        busco --in {input.genome} \
+        --out {wildcards.species} \
+        --out_path {params.outdir} \
+        --mode {params.mode} \
+        --lineage_dataset {params.lineage} \
+        --augustus \
+        --force \
+        --download_path {params.busco_download} \
+        --cpu {resources.threads}'
+        """
+
+# rule combine_assembly_stats_table:
+#     input:
+#         expand("results/busco/{species}_busco_output/short_summary.{species}.txt", species=species_name)
+#     output:
+#         stat_table = "results/genome_stats/combined_stats_table.txt"
+#     shell:
+#         Create a table containing all statistics
+#         #Assembly Num_scaffolds Assembly_Mp_N Assembly_Mp_noN GC_percent N_percent N50 BUSCO
+
+# # rule filter_assemblies:
+# #     input:
+# #         After manual inspection of the assembly stats file, 
+# #         the input here is a list of assemblies to be removed from the sample_design_table
+# #     output:
+# #         An updated sample_design table containing the assemblies to be kept. Once this is updated, 
+# #         the rule all will also be updated.
+# #     shell:
+# #         Code to produce the updated sample design table
+# #         Remove the assemblies no longer needed, 
+# #         Remove their BUSCO output
+# #         Remove their rows from the assembly stats table
+
+# rule create_repeatmodeler_db:
+#     input:
+#         genome_fasta="data/FastaGenomeEdited/{species}.fasta"
+#     output:
+#         prefix="results/repeat_modeler/{species}/{species}",
+#         nhr="results/repeat_modeler/{species}/{species}.nhr",
+#         nin="results/repeat_modeler/{species}/{species}.nin",
+#         njs="results/repeat_modeler/{species}/{species}.njs",
+#         nnd="results/repeat_modeler/{species}/{species}.nnd",
+#         nni="results/repeat_modeler/{species}/{species}.nni",
+#         nog="results/repeat_modeler/{species}/{species}.nog",
+#         nsq="results/repeat_modeler/{species}/{species}.nsq",
+#         translation="results/repeat_modeler/{species}/{species}.translation"
+#     resources:
+#         threads=2,
+#         mem_mb=12000,
+#         runtime="6h"
+#     singularity:
+#         "containers/tetools_1.89.2.sif"
+#     shell:
+#         """
+#         BuildDatabase -name {output.prefix} {input.genome_fasta}
+#         """
+
+rule run_repeatmodeler:
+    input:
+        genome_fasta="data/FastaGenomeEdited/{species}.fasta"
+    output:
+        repeat_consensus="results/repeat_modeler/{species}/{species}.consensi.fa.classified"
+    params:
+       RM_output=directory("results/repeat_modeler/{species}"),
+       genome="{species}.fasta"
+    resources:
+        threads=10,
+        mem_mb=60000,
+        runtime="72h"
+    singularity:
+        "containers/tetools_1.89.2.sif"
+    shell:
+        """
+        cp {input.genome_fasta} {params.RM_output}
+        cd {params.RM_output}
+        BuildDatabase -name {wildcards.species} {params.genome}
+        RepeatModeler -threads {resources.threads} -database {wildcards.species} -LTRStruct
+        dir=$(ls | grep RM)
+        cp $dir/consensi.fa.classified .
+        mv consensi.fa.classified {wildcards.species}.consensi.fa.classified 
+        """
+
+# # def find_repeatmodeler_output(species):
+# #     base_dir = f"results/repeat_modeler/{species}/"
+# #     rm_directories = glob.glob(os.path.join(base_dir, "RM_*"))
+# #     if rm_directories:
+# #         consensi_file = os.path.join(rm_directories[0], "consensi.fa.classified")
+# #         if os.path.isfile(consensi_file):
+# #             return consensi_file
+# #     return None
+
+# # checkpoint run_repeatmodeler:
+# #     input:
+# #         db="results/repeat_modeler/{species}/{species}.db.nhr"
+# #     output:
+# #         directory("results/repeat_modeler/{species}/RM_*")
+# #         results/repeat_modeler/output/{wildcards.species}/consensus.fasta
+# #     #params:
+# #     #    cores=config["cores"]
+# #     shell:
+# #         """
+# #         output_dir=results/repeat_modeler/{wildcards.species}
+# #         cd $output_dir
+# #         RepeatModeler -database {input.db} -LTRStruct
+# #         mkdir -p results/repeat_modeler/output/{wildcards.species}/
+# #         rm -rf results/repeat_modeler/output/consensus.fasta
+# #         cp $(find results/repeat_modeler/{wildcards.species}/RM_*/ -name consensus.fasta) results/repeat_modeler/output/{wildcards.species}/consensus.fasta
+# #         """ # Check other program Rory used for algae instead of Repeat modeler #-threads {params.cores}  For the annotation purpose, RepeatModeler is good enough.
+
+# def decide_repeatmodeler_output(wildcards):
+#     species = wildcards.species
+#     rm_output = find_repeatmodeler_output(species)
+#     if rm_output:
+#         return rm_output
+#     else:
+#         ck = checkpoints.run_repeatmodeler.get(species=species)
+#         return find_repeatmodeler_output(species)
+
+# rule run_repeatmasker:
+#     input:
+#         genome_fasta="data/comp_project_data/assembly_fasta/{species}.fa",
+#         RMlib=decide_repeatmodeler_output
+#     output:
+#         "results/repeatmasker/{species}/{species}_masked.fasta"
+#     #params:
+#     #    cores=config["cores"]
+#     shell:
+#         """
+#         mkdir -p results/repeatmasker/{wildcards.species}
+#         RepeatMasker -dir results/repeatmasker/{wildcards.species} -xm -a -gff -lib {input.RMlib} -xsmall {input.genome_fasta}
+#         """ #  -pa {params.cores} 
+
+# # # rule write_repeats_stats_table:
+# # # input:
+# # # output:
+# # # shell:
+
+# # rule run_braker3:
+# #     input:
+# #         genome = "data/FastaGenomeEdited/{sample}.fasta",
+# #         prot_evidence="protein_evidence"
+# #     output:
+# #         "braker/Astrephomene_gubernaculifera/braker.gff3"
+# #     #params:
+# #     #    cores=config["cores"]
+# #     shell:
+# #         """
+# #         singularity exec braker3.sif braker.pl \
+# #             --genome={input.genome} \
+# #             --prot_seq={input.prot_evidence} \
+# #             --softmasking \
+# #             --workingdir=braker/Astrephomene_gubernaculifera \
+# #             --busco_lineage=chlorophyta_odb10 \
+# #             --AUGUSTUS_CONFIG_PATH=./augustus_config
+            
+# #         """
+# #         # --threads {params.cores}
+
+# # rule busco_annotation:
+# #     input:
+# #         genome = "data/FastaGenomeEdited/{sample}.fasta"
+# #     output:
+# #         f"busco/output/run_busco/short_summary.specific.{config['lineage']}.txt"
+# #     params:
+# #         lineage=config["lineage"],
+# #         out_dir="busco/output",
+# #         mode="genome"
+# #     shell:
+# #         """
+# #         busco \
+# #             -i {input.genome} \
+# #             -o {params.out_dir} \
+# #             -l {params.lineage} \
+# #             -m {params.mode} \
+# #             -c {config['cores']}
+# #         """
+
+# # rule omamer_annotation:
+# #     input:
+# #         fasta="data/FastaGenomeEdited/{sample}.faa"
+# #     output:
+# #         dbhits="results/omamer/{sample}_dbhits.tsv"
+# #     log:
+# #         stdout="logs/omamer/{sample}_omamer.out",
+# #         stderr="logs/omamer/{sample}_omamer.err"
+# #     params:
+# #         db="path/to/omamer_db"
+# #     conda:
+# #         "envs/omark.yaml"
+# #     resources:
+# #         mem_mb = 8000,
+# #         threads= 4
+# #     shell:
+# #         """
+# #         omamer search --db {db} --query {input.fasta} --out {output.dbhits}
+# #         """
+
+# # rule omark_annotation:
+# #     input:
+# #         dbhits="results/omamer/{sample}_dbhits.tsv"
+# #     output:
+# #         directory="results/omark/{sample}"
+# #     log:
+# #         stdout="logs/omark/{sample}_omark.out",
+# #         stderr="logs/omark/{sample}_omark.err"
+# #     params:
+# #         db="path/to/omamer_db"
+# #     conda:
+# #         "envs/omark.yaml"
+# #     resources:
+# #         mem_mb = 8000,
+# #         threads = 4
+# #     shell:
+# #         "omark -f {input.dbhits} -d {params.db} -o {output}"
+
+# # # rule write_annotation_stats_table:
+# # # input:
+# # # output:
+# # # shell:
+
+# # # rule clean_annotation:
+# # # input:
+# # # output:
+# # # shell:
+
+# # rule orthofinder:
+# #     input:
+# #         faa_dir = "results/proteomes"
+# #     output:
+# #         directory="results/orthofinder"
+# #     log:
+# #         stdout="logs/orthofinder.out",
+# #         stderr="logs/orthofinder.err"
+# #     conda:
+# #         "envs/orthofinder.yaml"
+# #     resources:
+# #         mem_mb=10000,
+# #         threads=16
+# #     shell:
+# #         """
+# #         orthofinder.py -f {input.faa_dir} -t {resources.threads} -a {resources.threads} -o {output} \
+# #         > {log.stdout} 2> {log.stderr}
+# #         """
+
+# # # Phase B: Gene families -> Inference about genetics of multicellularity
